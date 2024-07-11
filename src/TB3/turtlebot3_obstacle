@@ -1,0 +1,340 @@
+#!/usr/bin/env python
+
+import rospy
+import math
+import time
+import smbus2
+import tf
+from sensor_msgs.msg import LaserScan
+from std_msgs.msg import String
+from geometry_msgs.msg import Twist
+from nav_msgs.msg import Odometry
+from sensor_msgs.msg import JointState
+from turtlebot3_example.msg import LidarData
+
+import sys, select, os
+if os.name == 'nt':
+  import msvcrt
+else:
+  import tty, termios
+
+LINEAR_VEL = 0.05
+LIN_VEL_STEP_SIZE = 0.01
+LIDAR_ERROR = 0.25 # prev 0.05
+SAFE_STOP_DISTANCE = 0.10 + LIDAR_ERROR
+FRONT_STOP_DIST = 0.2 + LIDAR_ERROR
+
+prev_position = None
+prev_time = None
+speedList = []
+settings = None
+receivedAction = None
+position_x = None
+position_y = None
+orientation_z = None
+actualSpeed = None
+left_wheel_pos = None
+right_wheel_pos = None
+left_wheel_vel = None
+right_wheel_vel = None
+
+#Thesis work
+def calculate_speed(current_position, current_time):
+    global prev_position, prev_time, speedList
+    speed = 0
+
+    # Ensure SLAM is running properly
+    if prev_position is None or prev_time is None:
+        prev_position = current_position
+        prev_time = current_time
+        return 0.0
+
+    # Calculate distance covered
+    dx = current_position[0] - prev_position[0]
+    dy = current_position[1] - prev_position[1]
+    distance = math.sqrt(dx**2 + dy**2)
+    dt = (current_time - prev_time).to_sec()
+
+    # Calculate speed
+    if dt > 0:
+        speed = distance / dt
+        if speed < 0.3:
+            speedList.append(speed)
+
+            if len(speedList) > 5:
+                speedList.pop(0)
+
+            prev_position = current_position
+            prev_time = current_time
+        return calculate_median(speedList)
+
+    return 0.0
+
+#Thesis work
+def calculate_median(speeds):
+    # Sort speed
+    speeds.sort()
+    n = len(speeds)
+    mid = n // 2
+    # If the number of speeds is odd, return the middle number.
+    if n % 2 == 1:
+        return speeds[mid]
+    # If the number of speeds is even, return the average of the middle two numbers.
+    else:
+        return (speeds[mid - 1] + speeds[mid]) / 2
+
+
+def getKey():
+    if os.name == 'nt':
+      if sys.version_info[0] >= 3:
+        return msvcrt.getch().decode()
+      else:
+        return msvcrt.getch()
+
+    tty.setraw(sys.stdin.fileno())
+    rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
+    if rlist:
+        key = sys.stdin.read(1)
+    else:
+        key = ''
+
+    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
+    return key
+
+def processReceivedMessage(message):
+    try:
+       linear, angular = message.split(',')
+       linear = float(linear)
+       angular = float(angular)
+       return linear, angular
+    except ValueError:
+       return None, None
+
+def ros_callback(data):
+    global receivedAction
+    rospy.loginfo("Action has been received")
+    receivedAction = data.data
+
+class RGBsensor(): #RGB sensor class
+    def __init__(self): #RGB sensor initialization
+        self.bus = smbus2.SMBus(1) #I2C bus 1 is used for the ISL29125 RGB sensor 
+        time.sleep(0.5) #Wait for the initialization to finish
+        self.bus.write_byte_data(0x44, 0x01 , 0x05) # Configure the RGB Sensor's register to read RGB values
+
+    #Reads the RGB sensor data and returns the values as a tuple (Red, Green, Blue)
+    def get_color(self):
+        # Read data from I2C interface
+        Green = self.bus.read_word_data(0x44, 0x09)
+        Red = self.bus.read_word_data(0x44, 0x0B)
+        Blue= self.bus.read_word_data(0x44, 0x0D)
+        return (Red, Green, Blue)
+
+def joint_states_callback(msg):
+    global left_wheel_pos, right_wheel_pos, left_wheel_vel, right_wheel_vel
+    left_wheel_pos = msg.position[0]
+    right_wheel_pos = msg.position[1]
+    left_wheel_vel = msg.velocity[0]
+    right_wheel_vel = msg.velocity[1]
+
+def oscillate_values(start=0.05, end=0.15, step=0.01):
+    current_value = start
+    direction = 1  # 1 means increasing, -1 means decreasing
+
+    while True:
+        print(current_value)
+        current_value += direction * step
+
+        # Change direction at the limits
+        if current_value >= end:
+            direction = -1
+        elif current_value <= start:
+            direction = 1
+
+class Obstacle():
+    def __init__(self):
+        self._cmd_pub = rospy.Publisher('cmd_vel', Twist, queue_size=1) # Try queue size 0??
+        self.remaining_angle = 0 # the remaining angle to turn
+        self._turn_speed = 0.5 # the turning speed
+        self.accumulated_speed = 0
+        self.speed_updates = 0
+        self.average_speed = 0
+        self.current_value = 0.05
+        self.start = 0.05
+        self.end = 0.15
+        self.step = 0.01
+        self.direction = 1
+        self.obstacle() # call the obstacle method
+
+    def get_next_value(self):
+        # Update the current value
+        self.current_value += self.direction * self.step
+
+        # Change direction at the limits
+        if self.current_value >= self.end:
+            self.direction = -1
+        elif self.current_value <= self.start:
+            self.direction = 1
+
+        return self.current_value
+
+    def get_scan(self):
+        scan = rospy.wait_for_message('scan', LaserScan) # wait for laser scan message
+        scan_filter = [] # create empty array to store filtered lidar data
+        # https://docs.ros.org/en/noetic/api/sensor_msgs/html/msg/LaserScan.html    
+
+        for i in range(len(scan.ranges)): # iterate through the lidar samples
+            scan_filter.append(scan.ranges[i]) # append the filtered lidar data to the list
+
+        for i in range(len(scan_filter)): # iterate through the filtered lidar data
+            curRead = scan_filter[i]
+            if curRead == float('Inf') or curRead < 0.01 or math.isnan(curRead): # check if the lidar data is gibberish
+                scan_filter[i] = 1.0 # set the lidar data to a large number (invalid)
+        return scan_filter
+
+    def obstacle(self):
+        global receivedAction, LINEAR_VEL
+
+        counter = 0
+        prevReceivedAction = False
+        
+        listener = tf.TransformListener()
+        rospy.wait_for_message('/joint_states', JointState)
+
+        twist = Twist() # create a Twist message to send velocity commands
+        collision_count = 0 # number of collisions
+        collision_cd = 0 # collision cooldown
+        rate = rospy.Rate(0.5)
+
+        #Thesis work
+        rospy.Subscriber("Action", String, ros_callback)
+        rospy.Subscriber('/joint_states', JointState, joint_states_callback)
+        combined_msg = LidarData()
+        pub = rospy.Publisher("Data", LidarData, queue_size=1)
+
+        try:
+            while (not rospy.is_shutdown()):
+                #LINEAR_VEL = self.get_next_value(self)
+
+                try:
+                    #Thesis work
+                    (trans, _) = listener.lookupTransform('/map', '/base_footprint', rospy.Time(0))
+                    currentTime = rospy.Time.now()
+                    actualSpeed = calculate_speed(trans, currentTime)
+
+                except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
+                    continue
+                scan_read = self.get_scan() # get the filtered lidar data
+                samples = len(scan_read)
+
+                # Discard readings beyond the scope we want to work with here (take from -120 to +120 deg)
+                lidar_distances = scan_read[2*int(samples/3):] 
+                lidar_distances.extend(scan_read[:int(samples/3)])
+                samples = len(lidar_distances) #update samples
+                #Partition readings into cones for evaluating navigation from
+                frontCone = lidar_distances[90:150] # -30 deg to +30 deg
+                rightCone = lidar_distances[150:] # 30 deg to 120 deg
+                leftCone = lidar_distances[:90] # -120 deg to -30 deg
+                min_distance = min(lidar_distances) # get the minimum distance of the filtered lidar data
+                rospy.loginfo('Lidar min dist: %f', min_distance)
+                #rospy.loginfo('Array length %d', samples)
+                #if prevReceivedAction == False:
+                if True:
+                    if min(frontCone) < 0.04 or min(rightCone) < 0.05 or min(leftCone) < 0.05:
+                        if collision_cd < 1:
+                            collision_count += 1
+                            collision_cd = 5
+                            rospy.loginfo('Collision detected, total collisions: %d', collision_count)   
+                    collision_cd -= 1 # Cooldown for loop cycles on colissions
+                    action = ""
+                    if min(frontCone) < FRONT_STOP_DIST:
+                        part = int(len(rightCone)/2) # Use to look more detailed in the side cones
+                        frontPart = int(len(frontCone)/2) # Split front cone in left and right
+                        frontRight = min(frontCone[:frontPart])
+                        frontLeft = min(frontCone[frontPart:])
+                        rightEval1 = min(rightCone[:part])
+                        rightEval2 = min(rightCone[part:])
+                        leftEval1 = min(leftCone[part:])
+                        leftEval2 = min(leftCone[:part])
+
+                        rightEval = min(lidar_distances[:120])
+                        leftEval = min(lidar_distances[120:])
+
+                        if (rightEval < SAFE_STOP_DISTANCE/3 and leftEval < SAFE_STOP_DISTANCE/3): 
+                            # If we think we're cornered, do a 180
+                            twist.linear.x = 0.0
+                            twist.angular.z = 0.96
+                            action = "Do a 180"
+
+                        elif(leftEval <= rightEval): # Decide if it's more important to turn left or right in general
+                            #Turn right 
+                            if(frontLeft < FRONT_STOP_DIST/1.25):
+                                twist.angular.z = -0.9 * 1/frontLeft
+                                action = "Very Right"
+                            elif(leftEval1 < SAFE_STOP_DISTANCE):
+                                twist.angular.z = -0.9 * 1/leftEval1
+                                action = 'Right!'
+                            elif(leftEval2 < SAFE_STOP_DISTANCE):
+                                twist.angular.z = -0.9 * 2/leftEval2
+                                action = "Slight Right"
+                        else:
+                            #Turn left
+                            if(frontRight < FRONT_STOP_DIST/1.25):
+                                twist.angular.z = 0.9 * 1/frontRight
+                                action = "Very Left!"
+                            elif(rightEval1 < SAFE_STOP_DISTANCE):
+                                twist.angular.z = 0.9 * 1/rightEval1
+                                action = "Left!"
+                            elif(rightEval2 < SAFE_STOP_DISTANCE):
+                                twist.angular.z = 0.9 * 2/rightEval2
+                                action = "Slight Left!"
+
+                    else:
+                        twist.linear.x = LINEAR_VEL
+                        twist.angular.z = 0.0
+                        action = "Forward"
+
+                rospy.loginfo(action)
+
+                #Thesis work
+                data_str = [str(left_wheel_pos), str(right_wheel_pos), str(left_wheel_vel), str(right_wheel_vel), str(actualSpeed), str(twist.linear.x), str(twist.angular.z)]
+                combined_msg.lidar_values = scan_read
+                combined_msg.additional_data = data_str
+                pub.publish(combined_msg)
+                rospy.loginfo("published data")
+
+                rate.sleep()
+
+        #Thesis work
+		#Check for receivedAction from the DT
+                if receivedAction is not None:
+                    aLinear, aAngular = processReceivedMessage(receivedAction)
+                    if aLinear is not None and aAngular is not None:
+                        rospy.loginfo("An action has been activated!")
+                        twist.linear.x = aLinear
+                        twist.angular.z = aAngular
+                        prevReceivedAction = True
+                        counter = 0
+                    receivedAction = None
+
+                if prevReceivedAction and counter < 5:
+                    self._cmd_pub.publish(twist)
+                    counter += 1
+                else:
+                    prevReceivedAction = False
+                    self._cmd_pub.publish(twist)
+
+        except rospy.ROSInterruptException:
+            rospy.loginfo("Shutting down obstacle avoidance node.")
+
+def main():
+    global settings
+    if os.name != 'nt':
+        settings = termios.tcgetattr(sys.stdin)
+    rospy.init_node('turtlebot3_obstacle')
+    try:
+        obstacle = Obstacle()
+    except rospy.ROSInterruptException:
+        pass
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,51 @@
+include "./Telegraf.tessla"
+
+#Optimization
+@TelegrafIn("mqtt_consumer", "host=joakim-MacBookPro", "expectedSpeed")
+in expectedSpeed: Events[Float]
+
+@TelegrafIn("mqtt_consumer", "host=joakim-MacBookPro", "actualSpeed")
+in actualSpeed: Events[Float]
+
+def diff = expectedSpeed -. actualSpeed
+
+def action = if diff >=. 0.03 then expectedSpeed +. diff *. 0.5 else expectedSpeed
+
+def newAction = if action >. 0.22 then 0.22 else action
+
+#safety
+@TelegrafIn("mqtt_consumer", "host=joakim-MacBookPro", "brakingDist")
+in brakingDist: Events[Float]
+@TelegrafIn("mqtt_consumer", "host=joakim-MacBookPro", "lidar_0")
+in lidarFront: Events[Float]
+
+@TelegrafIn("mqtt_consumer", "host=joakim-MacBookPro", "lidar_1_0")
+in lidarBack: Events[Float]
+
+def getOrientation = if expectedSpeed >. 0.0 then 1 else if expectedSpeed <. 0.0 then -1 else 0
+
+def stop =
+    if getOrientation == 1
+        then if lidarFront >. brakingDist
+            then true
+        else false
+    else if getOrientation == -1
+        then if lidarBack >. brakingDist
+            then true
+        else false
+   else false
+
+#validation
+def checkActualSpeed =
+	if actualSpeed >. 0.22
+		then false
+	else if actualSpeed <. 0.0
+		then false
+	else true
+
+@TelegrafOut("optimization")
+out newAction
+@TelegrafOut("safety")
+out stop
+@TelegrafOut("validation")
+out checkActualSpeed
