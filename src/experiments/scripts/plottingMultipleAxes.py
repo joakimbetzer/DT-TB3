@@ -11,7 +11,7 @@ def update_plot():
     fourth_value = []
 
     # Open and read the CSV file
-    with open('safety.csv', 'r') as file:
+    with open('../safety/data/safety.csv', 'r') as file:
         reader = csv.reader(file)
         for row in reader:
             # Convert the strings to floats and store them
@@ -32,7 +32,7 @@ def update_plot():
     ax2 = ax1.twinx()
 
     # Plot the first values
-    points1 = ax1.scatter(x_values, first_values, color='cyan', label='ActualSpeed Points')
+    points1 = ax1.scatter(x_values, first_values, color='cyan', label='ActualSpeed')
     line1, = ax1.plot(x_values, first_values, linestyle='-', color='cyan', alpha=0.5)  # Plot the line but don't include it in the legend
 
     # Plot the second values with dashed line
@@ -55,13 +55,13 @@ def update_plot():
             braking_distance_points.append(ax2.scatter(x, y, color='magenta'))
 
     # Add labels and title
-    ax1.set_xlabel('Time')
-    ax1.set_ylabel('Speed')
-    ax2.set_ylabel('Distance')
+    ax1.set_xlabel('Time (s)')
+    ax1.set_ylabel('Speed (m/s)')
+    ax2.set_ylabel('Distance (m)')
 
     # Combine legends from both axes
     handles = [points1, line3, line4]
-    labels = ['ActualSpeed Points', 'Lidar[0] (Front of robot)', 'Lidar[179] (Back of robot)']
+    labels = ['ActualSpeed', 'Lidar[0] (Front of robot)', 'Lidar[179] (Back of robot)']
 
     
     if braking_distance_points:
@@ -74,9 +74,9 @@ def update_plot():
 
     ax1.legend(handles, labels, loc='upper right')
 
-    fig.tight_layout()  # otherwise the right y-label is slightly clipped   
+    plt.title('Plot of testing safety RMV with simulated data')
 
-    plt.title('Plot of testing safety runtime monitor with simulated data')
+    fig.tight_layout()  # otherwise the right y-label is slightly clipped   
 
     # Customize the grid and tick marks
     plt.grid(True, color='gray', linestyle='--', linewidth=0.5)
