@@ -42,8 +42,8 @@ def update_plot():
     third_values_behind = third_values[28:]
 
     # Plot the third values with dashed lines
-    line3, = ax2.plot(x_values[:27], third_values_ahead, label='Lidar[0] (Front of robot)', linestyle='--', color='green')
-    line4, = ax2.plot(x_values[28:], third_values_behind, label='Lidar[179] (Back of robot)', linestyle='--', color='red')
+    line3, = ax2.plot(x_values[:27], third_values_ahead, label='Lidar[1] (Front of robot)', linestyle='--', color='green')
+    line4, = ax2.plot(x_values[28:], third_values_behind, label='Lidar[180] (Back of robot)', linestyle='--', color='red')
 
     # Highlight the points based on the fourth column
     safety_triggered_points = []
@@ -61,7 +61,7 @@ def update_plot():
 
     # Combine legends from both axes
     handles = [points1, line3, line4]
-    labels = ['ActualSpeed', 'Lidar[0] (Front of robot)', 'Lidar[179] (Back of robot)']
+    labels = ['ActualSpeed', 'Lidar[1] (Front of robot)', 'Lidar[180] (Back of robot)']
 
     
     if braking_distance_points:
